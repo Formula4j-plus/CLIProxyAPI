@@ -520,6 +520,16 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/usage-statistics-enabled", s.mgmt.PutUsageStatisticsEnabled)
 		mgmt.PATCH("/usage-statistics-enabled", s.mgmt.PutUsageStatisticsEnabled)
 
+		mgmt.GET("/remote-management/disable-control-panel", s.mgmt.GetDisableControlPanel)
+		mgmt.PUT("/remote-management/disable-control-panel", s.mgmt.PutDisableControlPanel)
+		mgmt.PATCH("/remote-management/disable-control-panel", s.mgmt.PutDisableControlPanel)
+		mgmt.GET("/remote-management/disable-auto-update-panel", s.mgmt.GetDisableAutoUpdatePanel)
+		mgmt.PUT("/remote-management/disable-auto-update-panel", s.mgmt.PutDisableAutoUpdatePanel)
+		mgmt.PATCH("/remote-management/disable-auto-update-panel", s.mgmt.PutDisableAutoUpdatePanel)
+		mgmt.GET("/remote-management/panel-github-repository", s.mgmt.GetPanelGitHubRepository)
+		mgmt.PUT("/remote-management/panel-github-repository", s.mgmt.PutPanelGitHubRepository)
+		mgmt.PATCH("/remote-management/panel-github-repository", s.mgmt.PutPanelGitHubRepository)
+
 		mgmt.GET("/proxy-url", s.mgmt.GetProxyURL)
 		mgmt.PUT("/proxy-url", s.mgmt.PutProxyURL)
 		mgmt.PATCH("/proxy-url", s.mgmt.PutProxyURL)

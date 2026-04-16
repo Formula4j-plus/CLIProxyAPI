@@ -34,6 +34,14 @@ const (
 	maxAssetDownloadSize         = 50 << 20 // 10 MB safety limit for management asset downloads
 )
 
+var defaultRepoAssetCandidates = []string{
+	managementAssetName,
+	"static/" + managementAssetName,
+	"public/" + managementAssetName,
+	"dist/" + managementAssetName,
+	"web/" + managementAssetName,
+}
+
 // ManagementFileName exposes the control panel asset filename.
 const ManagementFileName = managementAssetName
 
@@ -130,6 +138,12 @@ type releaseResponse struct {
 	Assets []releaseAsset `json:"assets"`
 }
 
+type repoSource struct {
+	ReleaseURL       string
+	RawAssetURLs     []string
+	DisplayReference string
+}
+
 // StaticDir resolves the directory that stores the management control panel asset.
 func StaticDir(configFilePath string) string {
 	if override := strings.TrimSpace(os.Getenv("MANAGEMENT_STATIC_PATH")); override != "" {
@@ -221,7 +235,7 @@ func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 			return nil, nil
 		}
 
-		releaseURL := resolveReleaseURL(panelRepository)
+		repoSource := resolveRepoSource(panelRepository)
 		client := newHTTPClient(proxyURL)
 
 		localHash, err := fileSHA256(localPath)
@@ -232,48 +246,18 @@ func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 			localHash = ""
 		}
 
-		asset, remoteHash, err := fetchLatestAsset(ctx, client, releaseURL)
-		if err != nil {
-			if localFileMissing {
-				log.WithError(err).Warn("failed to fetch latest management release information, trying fallback page")
-				if ensureFallbackManagementHTML(ctx, client, localPath) {
-					return nil, nil
-				}
+		updated, usedFallback := trySyncFromRepoSource(ctx, client, localPath, localHash, repoSource)
+		if updated {
+			return nil, nil
+		}
+		if localFileMissing {
+			if usedFallback {
 				return nil, nil
 			}
-			log.WithError(err).Warn("failed to fetch latest management release information")
-			return nil, nil
-		}
-
-		if remoteHash != "" && localHash != "" && strings.EqualFold(remoteHash, localHash) {
-			log.Debug("management asset is already up to date")
-			return nil, nil
-		}
-
-		data, downloadedHash, err := downloadAsset(ctx, client, asset.BrowserDownloadURL)
-		if err != nil {
-			if localFileMissing {
-				log.WithError(err).Warn("failed to download management asset, trying fallback page")
-				if ensureFallbackManagementHTML(ctx, client, localPath) {
-					return nil, nil
-				}
+			if ensureFallbackManagementHTML(ctx, client, localPath) {
 				return nil, nil
 			}
-			log.WithError(err).Warn("failed to download management asset")
-			return nil, nil
 		}
-
-		if remoteHash != "" && !strings.EqualFold(remoteHash, downloadedHash) {
-			log.Errorf("management asset digest mismatch: expected %s got %s — aborting update for safety", remoteHash, downloadedHash)
-			return nil, nil
-		}
-
-		if err = atomicWriteFile(localPath, data); err != nil {
-			log.WithError(err).Warn("failed to update management asset on disk")
-			return nil, nil
-		}
-
-		log.Infof("management asset updated successfully (hash=%s)", downloadedHash)
 		return nil, nil
 	})
 
@@ -300,36 +284,173 @@ func ensureFallbackManagementHTML(ctx context.Context, client *http.Client, loca
 	return true
 }
 
-func resolveReleaseURL(repo string) string {
+func trySyncFromRepoSource(ctx context.Context, client *http.Client, localPath string, localHash string, source repoSource) (bool, bool) {
+	if updated, ok := trySyncFromRelease(ctx, client, localPath, localHash, source); ok {
+		return updated, false
+	}
+	if updated, ok := trySyncFromRawURLs(ctx, client, localPath, localHash, source); ok {
+		return updated, false
+	}
+	return false, false
+}
+
+func trySyncFromRelease(ctx context.Context, client *http.Client, localPath string, localHash string, source repoSource) (bool, bool) {
+	if strings.TrimSpace(source.ReleaseURL) == "" {
+		return false, false
+	}
+
+	asset, remoteHash, err := fetchLatestAsset(ctx, client, source.ReleaseURL)
+	if err != nil {
+		log.WithError(err).Warn("failed to fetch latest management release information")
+		return false, false
+	}
+
+	if remoteHash != "" && localHash != "" && strings.EqualFold(remoteHash, localHash) {
+		log.Debug("management asset is already up to date")
+		return true, true
+	}
+
+	data, downloadedHash, err := downloadAsset(ctx, client, asset.BrowserDownloadURL)
+	if err != nil {
+		log.WithError(err).Warn("failed to download management asset from release")
+		return false, false
+	}
+
+	if remoteHash != "" && !strings.EqualFold(remoteHash, downloadedHash) {
+		log.Errorf("management asset digest mismatch: expected %s got %s — aborting update for safety", remoteHash, downloadedHash)
+		return false, false
+	}
+
+	if err = atomicWriteFile(localPath, data); err != nil {
+		log.WithError(err).Warn("failed to update management asset on disk")
+		return false, false
+	}
+
+	log.Infof("management asset updated successfully from release (hash=%s)", downloadedHash)
+	return true, true
+}
+
+func trySyncFromRawURLs(ctx context.Context, client *http.Client, localPath string, localHash string, source repoSource) (bool, bool) {
+	for _, rawURL := range source.RawAssetURLs {
+		data, downloadedHash, err := downloadAsset(ctx, client, rawURL)
+		if err != nil {
+			log.WithError(err).Debugf("failed to download management asset from repository path: %s", rawURL)
+			continue
+		}
+		if localHash != "" && strings.EqualFold(localHash, downloadedHash) {
+			log.Debugf("management asset is already up to date from repository path: %s", rawURL)
+			return true, true
+		}
+		if err = atomicWriteFile(localPath, data); err != nil {
+			log.WithError(err).Warn("failed to update management asset on disk")
+			return false, true
+		}
+		log.Infof("management asset updated successfully from repository path %s (hash=%s)", rawURL, downloadedHash)
+		return true, true
+	}
+	return false, false
+}
+
+func resolveRepoSource(repo string) repoSource {
 	repo = strings.TrimSpace(repo)
 	if repo == "" {
-		return defaultManagementReleaseURL
+		return repoSource{ReleaseURL: defaultManagementReleaseURL}
 	}
 
 	parsed, err := url.Parse(repo)
 	if err != nil || parsed.Host == "" {
-		return defaultManagementReleaseURL
+		return repoSource{ReleaseURL: defaultManagementReleaseURL}
 	}
 
 	host := strings.ToLower(parsed.Host)
 	parsed.Path = strings.TrimSuffix(parsed.Path, "/")
 
 	if host == "api.github.com" {
+		releaseURL := parsed.String()
 		if !strings.HasSuffix(strings.ToLower(parsed.Path), "/releases/latest") {
-			parsed.Path = parsed.Path + "/releases/latest"
+			releaseURL = strings.TrimSuffix(parsed.String(), "/") + "/releases/latest"
 		}
-		return parsed.String()
+		owner, repoName, ok := extractGitHubRepoFromAPIPath(parsed.Path)
+		if !ok {
+			return repoSource{ReleaseURL: releaseURL, DisplayReference: repo}
+		}
+		return repoSource{
+			ReleaseURL:       releaseURL,
+			RawAssetURLs:     buildGitHubRawAssetURLs(owner, repoName, "main"),
+			DisplayReference: repo,
+		}
 	}
 
 	if host == "github.com" {
-		parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
-		if len(parts) >= 2 && parts[0] != "" && parts[1] != "" {
-			repoName := strings.TrimSuffix(parts[1], ".git")
-			return fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", parts[0], repoName)
+		owner, repoName, ok := extractGitHubRepoFromWebPath(parsed.Path)
+		if !ok {
+			return repoSource{ReleaseURL: defaultManagementReleaseURL, DisplayReference: repo}
+		}
+		branch := extractGitHubBranchFromWebPath(parsed.Path)
+		return repoSource{
+			ReleaseURL:       fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", owner, repoName),
+			RawAssetURLs:     buildGitHubRawAssetURLs(owner, repoName, branch),
+			DisplayReference: repo,
 		}
 	}
 
-	return defaultManagementReleaseURL
+	if strings.HasSuffix(strings.ToLower(parsed.Path), ".html") {
+		return repoSource{RawAssetURLs: []string{parsed.String()}, DisplayReference: repo}
+	}
+
+	return repoSource{ReleaseURL: defaultManagementReleaseURL, DisplayReference: repo}
+}
+
+func resolveReleaseURL(repo string) string {
+	return resolveRepoSource(repo).ReleaseURL
+}
+
+func extractGitHubRepoFromWebPath(path string) (string, string, bool) {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", false
+	}
+	return parts[0], strings.TrimSuffix(parts[1], ".git"), true
+}
+
+func extractGitHubBranchFromWebPath(path string) string {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) >= 4 && strings.EqualFold(parts[2], "tree") && strings.TrimSpace(parts[3]) != "" {
+		return strings.TrimSpace(parts[3])
+	}
+	if len(parts) >= 4 && strings.EqualFold(parts[2], "blob") && strings.TrimSpace(parts[3]) != "" {
+		return strings.TrimSpace(parts[3])
+	}
+	return "main"
+}
+
+func extractGitHubRepoFromAPIPath(path string) (string, string, bool) {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) < 3 || !strings.EqualFold(parts[0], "repos") || parts[1] == "" || parts[2] == "" {
+		return "", "", false
+	}
+	return parts[1], parts[2], true
+}
+
+func buildGitHubRawAssetURLs(owner string, repoName string, branch string) []string {
+	owner = strings.TrimSpace(owner)
+	repoName = strings.TrimSpace(repoName)
+	branch = strings.TrimSpace(branch)
+	if owner == "" || repoName == "" {
+		return nil
+	}
+	if branch == "" {
+		branch = "main"
+	}
+	urls := make([]string, 0, len(defaultRepoAssetCandidates)+1)
+	for _, candidate := range defaultRepoAssetCandidates {
+		candidate = strings.TrimLeft(strings.TrimSpace(candidate), "/")
+		if candidate == "" {
+			continue
+		}
+		urls = append(urls, fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/%s/%s", owner, repoName, branch, candidate))
+	}
+	return urls
 }
 
 func fetchLatestAsset(ctx context.Context, client *http.Client, releaseURL string) (*releaseAsset, string, error) {

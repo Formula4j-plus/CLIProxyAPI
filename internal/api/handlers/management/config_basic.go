@@ -193,6 +193,30 @@ func (h *Handler) PutUsageStatisticsEnabled(c *gin.Context) {
 	h.updateBoolField(c, func(v bool) { h.cfg.UsageStatisticsEnabled = v })
 }
 
+// RemoteManagement DisableControlPanel
+func (h *Handler) GetDisableControlPanel(c *gin.Context) {
+	c.JSON(200, gin.H{"disable-control-panel": h.cfg.RemoteManagement.DisableControlPanel})
+}
+func (h *Handler) PutDisableControlPanel(c *gin.Context) {
+	h.updateBoolField(c, func(v bool) { h.cfg.RemoteManagement.DisableControlPanel = v })
+}
+
+// RemoteManagement DisableAutoUpdatePanel
+func (h *Handler) GetDisableAutoUpdatePanel(c *gin.Context) {
+	c.JSON(200, gin.H{"disable-auto-update-panel": h.cfg.RemoteManagement.DisableAutoUpdatePanel})
+}
+func (h *Handler) PutDisableAutoUpdatePanel(c *gin.Context) {
+	h.updateBoolField(c, func(v bool) { h.cfg.RemoteManagement.DisableAutoUpdatePanel = v })
+}
+
+// RemoteManagement PanelGitHubRepository
+func (h *Handler) GetPanelGitHubRepository(c *gin.Context) {
+	c.JSON(200, gin.H{"panel-github-repository": h.cfg.RemoteManagement.PanelGitHubRepository})
+}
+func (h *Handler) PutPanelGitHubRepository(c *gin.Context) {
+	h.updateStringField(c, func(v string) { h.cfg.RemoteManagement.PanelGitHubRepository = strings.TrimSpace(v) })
+}
+
 // UsageStatisticsEnabled
 func (h *Handler) GetLoggingToFile(c *gin.Context) {
 	c.JSON(200, gin.H{"logging-to-file": h.cfg.LoggingToFile})

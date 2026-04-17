@@ -398,3 +398,93 @@ func (c *Client) DeleteField(path string) error {
 	_, _, err := c.doRequest("DELETE", "/v0/management/"+path, nil)
 	return err
 }
+
+// AuthFileFilters holds filter parameters for listing auth files.
+type AuthFileFilters struct {
+	Priority *int
+	Plan     string
+	Account  string
+	Only401  bool
+}
+
+// GetAuthFilesFiltered lists auth files with optional filtering.
+func (c *Client) GetAuthFilesFiltered(filters AuthFileFilters) ([]map[string]any, error) {
+	query := url.Values{}
+	if filters.Priority != nil {
+		query.Set("priority", strconv.Itoa(*filters.Priority))
+	}
+	if filters.Plan != "" {
+		query.Set("plan", filters.Plan)
+	}
+	if filters.Account != "" {
+		query.Set("account", filters.Account)
+	}
+	if filters.Only401 {
+		query.Set("only_401", "true")
+	}
+
+	path := "/v0/management/auth-files"
+	encodedQuery := query.Encode()
+	if encodedQuery != "" {
+		path += "?" + encodedQuery
+	}
+
+	wrapper, err := c.getJSON(path)
+	if err != nil {
+		return nil, err
+	}
+	return extractList(wrapper, "files")
+}
+
+// DeleteAuthFilesByNames deletes multiple auth files by their names.
+func (c *Client) DeleteAuthFilesByNames(names []string) (map[string]any, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	query := url.Values{}
+	for _, name := range names {
+		query.Add("name", name)
+	}
+	path := "/v0/management/auth-files?" + query.Encode()
+
+	data, code, err := c.doRequest("DELETE", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if code >= 400 {
+		return nil, fmt.Errorf("delete failed (HTTP %d)", code)
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// DeleteAuthFilesOnly401 deletes all auth files with 401 errors.
+func (c *Client) DeleteAuthFilesOnly401() (map[string]any, error) {
+	query := url.Values{}
+	query.Set("only_401", "true")
+	path := "/v0/management/auth-files?" + query.Encode()
+
+	data, code, err := c.doRequest("DELETE", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if code >= 400 {
+		return nil, fmt.Errorf("delete failed (HTTP %d)", code)
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// RefreshAuthFileAccount refreshes account info for an auth file.
+func (c *Client) RefreshAuthFileAccount(name string) error {
+	body := map[string]any{"name": name}
+	return c.postJSON("/v0/management/auth-files/refresh", body)
+}

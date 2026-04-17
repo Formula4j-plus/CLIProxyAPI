@@ -42,6 +42,11 @@ type authTabModel struct {
 	editField    int             // index into authEditableFields
 	editInput    textinput.Model // text input for editing
 	editFileName string          // name of file being edited
+
+	// Filter state
+	filtering   bool // true when entering filter text
+	filterInput textinput.Model
+	filterText  string
 }
 
 type authFilesMsg struct {
@@ -54,14 +59,30 @@ type authActionMsg struct {
 	err    error
 }
 
+type authBatchDeleteMsg struct {
+	deleted int
+	err     error
+}
+
+type authRefreshMsg struct {
+	name string
+	err  error
+}
+
 func newAuthTabModel(client *Client) authTabModel {
-	ti := textinput.New()
-	ti.CharLimit = 256
+	editTi := textinput.New()
+	editTi.CharLimit = 256
+
+	filterTi := textinput.New()
+	filterTi.CharLimit = 128
+	filterTi.Prompt = "  "
+
 	return authTabModel{
-		client:    client,
-		expanded:  -1,
-		confirm:   -1,
-		editInput: ti,
+		client:      client,
+		expanded:    -1,
+		confirm:     -1,
+		editInput:   editTi,
+		filterInput: filterTi,
 	}
 }
 
@@ -71,6 +92,26 @@ func (m authTabModel) Init() tea.Cmd {
 
 func (m authTabModel) fetchFiles() tea.Msg {
 	files, err := m.client.GetAuthFiles()
+	return authFilesMsg{files: files, err: err}
+}
+
+func (m authTabModel) fetchFilteredFiles() tea.Msg {
+	filters := AuthFileFilters{}
+
+	filterText := strings.TrimSpace(m.filterText)
+	if filterText != "" {
+		if priority, err := strconv.Atoi(filterText); err == nil {
+			filters.Priority = &priority
+		} else {
+			if strings.HasPrefix(strings.ToLower(filterText), "plan:") {
+				filters.Plan = strings.TrimSpace(filterText[5:])
+			} else {
+				filters.Account = filterText
+			}
+		}
+	}
+
+	files, err := m.client.GetAuthFilesFiltered(filters)
 	return authFilesMsg{files: files, err: err}
 }
 
@@ -103,7 +144,30 @@ func (m authTabModel) Update(msg tea.Msg) (authTabModel, tea.Cmd) {
 		m.viewport.SetContent(m.renderContent())
 		return m, m.fetchFiles
 
+	case authBatchDeleteMsg:
+		if msg.err != nil {
+			m.status = errorStyle.Render("✗ " + msg.err.Error())
+		} else {
+			m.status = successStyle.Render(fmt.Sprintf("✓ "+T("deleted_401"), msg.deleted))
+		}
+		m.viewport.SetContent(m.renderContent())
+		return m, m.fetchFiles
+
+	case authRefreshMsg:
+		if msg.err != nil {
+			m.status = errorStyle.Render("✗ " + msg.err.Error())
+		} else {
+			m.status = successStyle.Render(fmt.Sprintf("✓ "+T("refreshed_account"), msg.name))
+		}
+		m.viewport.SetContent(m.renderContent())
+		return m, m.fetchFiles
+
 	case tea.KeyMsg:
+		// ---- Filter mode ----
+		if m.filtering {
+			return m.handleFilterInput(msg)
+		}
+
 		// ---- Editing mode ----
 		if m.editing {
 			return m.handleEditInput(msg)
@@ -147,6 +211,7 @@ func (m *authTabModel) SetSize(w, h int) {
 	m.width = w
 	m.height = h
 	m.editInput.Width = w - 20
+	m.filterInput.Width = w - 6
 	if !m.ready {
 		m.viewport = viewport.New(w, h)
 		m.viewport.SetContent(m.renderContent())
@@ -173,8 +238,23 @@ func (m authTabModel) renderContent() string {
 	sb.WriteString("\n")
 	sb.WriteString(helpStyle.Render(T("auth_help2")))
 	sb.WriteString("\n")
+	sb.WriteString(helpStyle.Render(T("auth_help3")))
+	sb.WriteString("\n")
 	sb.WriteString(strings.Repeat("─", m.width))
 	sb.WriteString("\n")
+
+	// Filter input
+	if m.filtering {
+		sb.WriteString(m.filterInput.View())
+		sb.WriteString("\n")
+		sb.WriteString(helpStyle.Render("    " + T("enter_submit") + " • " + T("esc_cancel")))
+		sb.WriteString("\n")
+		sb.WriteString(strings.Repeat("─", m.width))
+		sb.WriteString("\n")
+	} else if m.filterText != "" {
+		sb.WriteString(subtitleStyle.Render(fmt.Sprintf(T("filter_active"), m.filterText)))
+		sb.WriteString("\n")
+	}
 
 	if m.err != nil {
 		sb.WriteString(errorStyle.Render("⚠ Error: " + m.err.Error()))
@@ -273,6 +353,7 @@ func (m authTabModel) renderDetail(f map[string]any) string {
 		{"Name", "name", false},
 		{"Channel", "channel", false},
 		{"Email", "email", false},
+		{T("plan"), "plan_type", false},
 		{"Status", "status", false},
 		{"Status Msg", "status_message", false},
 		{"File Name", "file_name", false},
@@ -282,6 +363,7 @@ func (m authTabModel) renderDetail(f map[string]any) string {
 		{"Priority", "priority", true},
 		{"Project ID", "project_id", false},
 		{"Disabled", "disabled", false},
+		{"Last Refresh", "last_refresh", false},
 		{"Created", "created_at", false},
 		{"Updated", "updated_at", false},
 	}
@@ -392,6 +474,27 @@ func (m authTabModel) handleConfirmInput(msg tea.KeyMsg) (authTabModel, tea.Cmd)
 	return m, nil
 }
 
+func (m authTabModel) handleFilterInput(msg tea.KeyMsg) (authTabModel, tea.Cmd) {
+	switch msg.String() {
+	case "enter":
+		m.filterText = m.filterInput.Value()
+		m.filtering = false
+		m.filterInput.Blur()
+		m.viewport.SetContent(m.renderContent())
+		return m, m.fetchFilteredFiles
+	case "esc":
+		m.filtering = false
+		m.filterInput.Blur()
+		m.viewport.SetContent(m.renderContent())
+		return m, nil
+	default:
+		var cmd tea.Cmd
+		m.filterInput, cmd = m.filterInput.Update(msg)
+		m.viewport.SetContent(m.renderContent())
+		return m, cmd
+	}
+}
+
 func (m authTabModel) handleNormalInput(msg tea.KeyMsg) (authTabModel, tea.Cmd) {
 	switch msg.String() {
 	case "j", "down":
@@ -448,6 +551,42 @@ func (m authTabModel) handleNormalInput(msg tea.KeyMsg) (authTabModel, tea.Cmd) 
 	case "r":
 		m.status = ""
 		return m, m.fetchFiles
+	case "/":
+		m.filtering = true
+		m.filterInput.SetValue("")
+		m.filterInput.Focus()
+		m.viewport.SetContent(m.renderContent())
+		return m, textinput.Blink
+	case "x", "X":
+		m.filterText = ""
+		m.status = successStyle.Render(T("filter_clear"))
+		m.viewport.SetContent(m.renderContent())
+		return m, m.fetchFiles
+	case "4":
+		m.status = warningStyle.Render(T("delete_401"))
+		m.viewport.SetContent(m.renderContent())
+		return m, func() tea.Msg {
+			result, err := m.client.DeleteAuthFilesOnly401()
+			if err != nil {
+				return authBatchDeleteMsg{err: err}
+			}
+			deleted := 0
+			if v, ok := result["deleted"].(float64); ok {
+				deleted = int(v)
+			}
+			return authBatchDeleteMsg{deleted: deleted, err: nil}
+		}
+	case "f", "F":
+		if m.cursor < len(m.files) {
+			name := getString(m.files[m.cursor], "name")
+			m.status = warningStyle.Render(T("refresh_account"))
+			m.viewport.SetContent(m.renderContent())
+			return m, func() tea.Msg {
+				err := m.client.RefreshAuthFileAccount(name)
+				return authRefreshMsg{name: name, err: err}
+			}
+		}
+		return m, nil
 	default:
 		var cmd tea.Cmd
 		m.viewport, cmd = m.viewport.Update(msg)
